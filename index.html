@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>巡路者傳奇 — Pathfinder 2e</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #1a0f05; font-family: Georgia, serif; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #c9963a; border-radius: 2px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── 顏色 ─────────────────────────────────────────────────────────────────────
+const C = { g:'#c9963a',gb:'#f0b84a',p:'#f5e6c8',pd:'#e8d5a3',sh:'#1a0f05',st:'#6b5a4e',bl:'#8b1a1a',il:'#5c3a1e' }
+
+// ── 資料 ─────────────────────────────────────────────────────────────────────
+const SAVE_KEY    = 'pf2e_save_v1'
+const API_KEY_KEY = 'pf2e_gemini_key'
+
+const RACES      = ['人類','精靈','矮人','地精','半身人','侏儒','半精靈','半獸人','獸人','蜥蜴人']
+const CLASSES    = ['戰士','遊俠','盜賊','法師','牧師','德魯伊','吟遊詩人','聖武士','野蠻人','武僧','術士','巫師']
+const ALIGNMENTS = ['守序善良','中立善良','混亂善良','守序中立','真正中立','混亂中立','守序邪惡','中立邪惡','混亂邪惡']
+const STYLES = [
+  {id:'adventure', label:'奇幻冒險', icon:'⚔️', desc:'探索地下城、打倒怪物、尋找寶藏'},
+  {id:'intrigue',  label:'政治陰謀', icon:'🕵️',desc:'宮廷鬥爭、派系角力、謊言與背叛'},
+  {id:'horror',    label:'黑暗恐怖', icon:'💀', desc:'邪神崇拜、不死生物、瘋狂與黑暗'},
+  {id:'mystery',   label:'懸疑調查', icon:'🔍', desc:'謀殺案件、失蹤人口、古老秘密'},
+  {id:'seafaring', label:'海洋探索', icon:'⚓', desc:'航海冒險、海盜、神秘島嶼與海怪'},
+  {id:'war',       label:'戰爭史詩', icon:'🏰', desc:'國家戰爭、軍事策略、英雄與犧牲'},
+  {id:'custom',    label:'自訂劇情', icon:'✨', desc:'告訴 GM 你想要的故事'},
+]
+const STAT_NAMES = {str:'力量',dex:'敏捷',con:'體質',int:'智力',wis:'感知',cha:'魅力'}
+const RANK_LABEL = {trained:'熟練',expert:'專精',master:'大師',legendary:'傳奇'}
+const RANK_COLOR = {trained:'#c9963a',expert:'#4a90d9',master:'#9b59b6',legendary:'#e74c3c'}
+const TYPE_ICON  = {weapon:'⚔',armor:'🛡',gear:'🎒',consumable:'⚗'}
+const TYPE_LABEL = {weapon:'武器',armor:'防具',consumable:'消耗品',gear:'道具'}
+
+const DEFAULT_CHAR = {
+  name:'',race:'',cls:'',align:'',level:'1',hp:20,maxHp:20,
+  stats:{str:10,dex:10,con:10,int:10,wis:10,cha:10},
+  skills:[],feats:[],items:[]
+}
+
+// ── System Prompt ─────────────────────────────────────────────────────────────
+function buildPrompt(char, styleId, customDesc) {
+  const styleInfo = STYLES.find(s => s.id === styleId)
+  const styleNote = styleId === 'custom'
+    ? `玩家想要的劇情：${customDesc}`
+    : `劇情風格：${styleInfo.label}——${styleInfo.desc}`
+  return `你是一位《巡路者傳奇》（Pathfinder 2e）地城主（GM），主持中文單人跑團。
+
+【玩家角色】名字：${char.name}　種族：${char.race}　職業：${char.cls}　陣營：${char.align}
+【劇情設定】${styleNote}
+
+【世界生成】第一次回應時，根據劇情風格創造原創世界：世界名稱、地點、時代背景、核心衝突、開場鉤子。
+
+【Pathfinder 2e 規則】
+每次回應末尾必須輸出角色 JSON，用 ===JSON_START=== 和 ===JSON_END=== 包住：
+===JSON_START===
+{"name":"${char.name}","race":"${char.race}","cls":"${char.cls}","align":"${char.align}","level":1,"hp":20,"maxHp":20,"stats":{"str":10,"dex":10,"con":10,"int":10,"wis":10,"cha":10},"skills":[{"name":"技能","rank":"trained","bonus":5}],"feats":["專長（說明）"],"items":[{"name":"武器","type":"weapon","detail":"1d8 斬擊"},{"name":"防具","type":"armor","detail":"AC+2"},{"name":"道具","type":"gear","detail":"功能說明"}]}
+===JSON_END===
+- 根據職業給合理初始能力值、技能、專長與裝備
+- 定期要求技能檢定（說明 DC 值）；大成功有額外收穫，大失敗有代價
+- 追蹤 HP 變化；升級時更新 level 並給新專長
+
+【敘事規則】
+- 每次回應 150–300 字，場景生動、NPC 有個性
+- 給玩家 2–3 個明確行動方向（不限制其他行動）
+- 使用繁體中文，文風雅緻`
+}
+
+// ── Gemini API ────────────────────────────────────────────────────────────────
+async function callGemini(apiKey, history, userMsg, systemPrompt) {
+  const contents = [
+    ...history,
+    { role: 'user', parts: [{ text: userMsg }] }
+  ]
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents,
+        generationConfig: { maxOutputTokens: 1400, temperature: 0.9 }
+      })
+    }
+  )
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.error?.message || `HTTP ${res.status}`)
+  }
+  const data = await res.json()
+  const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || '（無回應）'
+  const newHistory = [...contents, { role: 'model', parts: [{ text: reply }] }]
+  return { reply, history: newHistory }
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+const mod = v => { const m = Math.floor((v-10)/2); return (m>=0?'+':'')+m }
+
+function parseGMReply(text) {
+  const match = text.match(/===JSON_START===\s*([\s\S]*?)\s*===JSON_END===/)
+  let charData = null
+  let cleanText = text
+  if (match) {
+    try { charData = JSON.parse(match[1]) } catch {}
+    cleanText = text.replace(/===JSON_START===[\s\S]*?===JSON_END===/g, '').trim()
+  }
+  return { cleanText, charData }
+}
+
+const loadSave    = ()  => { try { const r=localStorage.getItem(SAVE_KEY); return r?JSON.parse(r):null } catch { return null } }
+const writeSave   = d   => { try { localStorage.setItem(SAVE_KEY, JSON.stringify(d)) } catch {} }
+const clearSave   = ()  => { try { localStorage.removeItem(SAVE_KEY) } catch {} }
+const loadApiKey  = ()  => { try { return localStorage.getItem(API_KEY_KEY)||'' } catch { return '' } }
+const saveApiKey  = k   => { try { localStorage.setItem(API_KEY_KEY, k) } catch {} }
+
+function doExport(data) {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}))
+  a.download = `pf2e_save_${Date.now()}.json`; a.click(); URL.revokeObjectURL(a.href)
+}
+
+// ── Shared UI ─────────────────────────────────────────────────────────────────
+function OptionGrid({ options, value, onChange, columns=3 }) {
+  return (
+    <div style={{display:'grid',gridTemplateColumns:`repeat(${columns},1fr)`,gap:'0.4rem'}}>
+      {options.map(opt => {
+        const id    = typeof opt==='string'?opt:opt.id
+        const label = typeof opt==='string'?opt:opt.label
+        const icon  = typeof opt==='string'?null:opt.icon
+        const desc  = typeof opt==='string'?null:opt.desc
+        const sel   = value===id
+        return (
+          <button key={id} onClick={()=>onChange(id)} style={{
+            background: sel?'rgba(201,150,58,0.2)':'rgba(30,18,8,0.8)',
+            border:`1px solid ${sel?C.gb:C.il}`, borderRadius:4,
+            padding:desc?'0.6rem 0.5rem':'0.45rem 0.3rem',
+            color:sel?C.gb:C.pd, cursor:'pointer', fontSize:'0.82rem',
+            textAlign:desc?'left':'center', transition:'all 0.15s',
+          }}>
+            {icon&&<span style={{marginRight:'0.3rem'}}>{icon}</span>}
+            <span style={{fontWeight:sel?'bold':'normal'}}>{label}</span>
+            {desc&&<div style={{color:C.st,fontSize:'0.7rem',marginTop:'0.2rem',lineHeight:1.4}}>{desc}</div>}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function Panel({ label, open, onToggle, badge, children }) {
+  return (
+    <div style={{border:`1px solid ${C.g}`,borderRadius:4,overflow:'hidden',flexShrink:0}}>
+      <button onClick={onToggle} style={{width:'100%',background:'linear-gradient(135deg,rgba(44,26,14,0.95),rgba(26,15,5,0.98))',border:'none',padding:'0.6rem 1rem',display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer',color:C.gb,fontSize:'0.82rem'}}>
+        <span>
+          {label}
+          {badge&&<span style={{background:'rgba(201,150,58,0.2)',border:`1px solid ${C.g}`,borderRadius:10,padding:'0.1rem 0.5rem',fontSize:'0.7rem',marginLeft:'0.4rem'}}>{badge}</span>}
+        </span>
+        <span style={{color:C.st}}>{open?'▲':'▼'}</span>
+      </button>
+      {open&&<div style={{background:'rgba(20,12,5,0.97)',padding:'0.7rem 1rem'}}>{children}</div>}
+    </div>
+  )
+}
+
+function Divider({ label }) {
+  return (
+    <div style={{display:'flex',alignItems:'center',gap:'0.5rem',margin:'0.6rem 0 0.4rem',color:C.st,fontSize:'0.7rem',letterSpacing:'0.15em'}}>
+      <div style={{flex:1,height:1,background:'rgba(201,150,58,0.2)'}}/>{label}<div style={{flex:1,height:1,background:'rgba(201,150,58,0.2)'}}/>
+    </div>
+  )
+}
+
+// ── API Key Screen ────────────────────────────────────────────────────────────
+function ApiKeyScreen({ onConfirm }) {
+  const [key, setKey] = useState(loadApiKey())
+  const [testing, setTesting] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleConfirm = async () => {
+    if (!key.trim()) return
+    setTesting(true); setError('')
+    try {
+      await callGemini(key.trim(), [], '請回覆「確認」兩個字。', '你是助手，只需回覆「確認」。')
+      saveApiKey(key.trim())
+      onConfirm(key.trim())
+    } catch (e) {
+      setError('API key 無效或網路錯誤：' + e.message)
+    }
+    setTesting(false)
+  }
+
+  return (
+    <div style={{background:C.sh,minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'1.5rem'}}>
+      <div style={{textAlign:'center',marginBottom:'2rem'}}>
+        <div style={{fontSize:'1.8rem',color:C.gb,fontWeight:'bold',textShadow:'0 0 24px rgba(240,184,74,0.4)'}}>⚔ 巡路者傳奇 ⚔</div>
+        <div style={{fontSize:'0.7rem',color:C.st,letterSpacing:'0.3em',marginTop:'0.3rem'}}>PATHFINDER 2E · AI 跑團</div>
+      </div>
+      <div style={{width:'100%',maxWidth:440,background:'linear-gradient(160deg,rgba(44,26,14,0.97),rgba(20,12,5,0.99))',border:`1px solid ${C.g}`,borderRadius:6,padding:'1.5rem',boxShadow:'0 8px 40px rgba(0,0,0,0.7)'}}>
+        <div style={{color:C.st,fontSize:'0.7rem',letterSpacing:'0.2em',marginBottom:'0.6rem'}}>輸入你的 Gemini API Key</div>
+        <input
+          value={key} onChange={e=>setKey(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&handleConfirm()}
+          placeholder="AIza..."
+          type="password"
+          style={{width:'100%',background:'rgba(20,12,5,0.9)',border:`1px solid ${C.il}`,borderRadius:3,color:C.p,fontSize:'0.95rem',padding:'0.65rem 0.9rem',outline:'none',marginBottom:'0.6rem'}}
+        />
+        {error&&<div style={{color:'#e07070',fontSize:'0.8rem',marginBottom:'0.6rem',lineHeight:1.5}}>{error}</div>}
+        <button onClick={handleConfirm} disabled={!key.trim()||testing}
+          style={{width:'100%',background:'rgba(201,150,58,0.3)',border:`1px solid ${C.g}`,color:C.gb,fontSize:'0.9rem',padding:'0.65rem',cursor:'pointer',borderRadius:3,opacity:(!key.trim()||testing)?0.5:1}}>
+          {testing?'驗證中⋯':'進入遊戲 ▶'}
+        </button>
+        <div style={{color:C.st,fontSize:'0.75rem',marginTop:'1rem',lineHeight:1.7}}>
+          · Key 只存在你的瀏覽器，不會傳送給任何第三方<br/>
+          · 可在 <a href="https://aistudio.google.com/apikey" target="_blank" style={{color:C.g}}>Google AI Studio</a> 免費取得
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Character Creation ────────────────────────────────────────────────────────
+const STEPS = ['name','race','class','align','campaign']
+
+function CharacterCreation({ onStart }) {
+  const [step,setStep]         = useState(0)
+  const [name,setName]         = useState('')
+  const [race,setRace]         = useState('')
+  const [cls,setCls]           = useState('')
+  const [align,setAlign]       = useState('')
+  const [campaign,setCampaign] = useState('')
+  const [customDesc,setCustom] = useState('')
+
+  const stepKey = STEPS[step]
+  const isLast  = step === STEPS.length-1
+
+  const canNext = () => {
+    if (stepKey==='name')     return name.trim().length>0
+    if (stepKey==='race')     return race!==''
+    if (stepKey==='class')    return cls!==''
+    if (stepKey==='align')    return align!==''
+    if (stepKey==='campaign') return campaign!==''&&(campaign!=='custom'||customDesc.trim().length>0)
+    return false
+  }
+
+  const handleNext = () => {
+    if (!canNext()) return
+    if (isLast) onStart({name:name.trim(),race,cls,align}, campaign, customDesc.trim())
+    else setStep(s=>s+1)
+  }
+
+  return (
+    <div style={{background:C.sh,minHeight:'100vh',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'1.5rem 1rem'}}>
+      <div style={{textAlign:'center',marginBottom:'1.8rem'}}>
+        <div style={{fontSize:'1.8rem',color:C.gb,fontWeight:'bold',textShadow:'0 0 24px rgba(240,184,74,0.4)'}}>⚔ 巡路者傳奇 ⚔</div>
+        <div style={{fontSize:'0.7rem',color:C.st,letterSpacing:'0.3em',marginTop:'0.3rem'}}>PATHFINDER 2E · 角色建立</div>
+      </div>
+      <div style={{width:'100%',maxWidth:500,background:'linear-gradient(160deg,rgba(44,26,14,0.97),rgba(20,12,5,0.99))',border:`1px solid ${C.g}`,borderRadius:6,padding:'1.5rem',boxShadow:'0 8px 40px rgba(0,0,0,0.7)'}}>
+        {/* Progress bar */}
+        <div style={{display:'flex',gap:'0.3rem',marginBottom:'1.4rem'}}>
+          {STEPS.map((s,i)=><div key={s} style={{flex:1,height:3,borderRadius:2,background:i<=step?C.gb:'rgba(201,150,58,0.2)',transition:'background 0.3s'}}/>)}
+        </div>
+
+        {stepKey==='name'&&<>
+          <div style={{color:C.st,fontSize:'0.7rem',letterSpacing:'0.2em',marginBottom:'0.5rem'}}>第一步 · 為你的冒險者命名</div>
+          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleNext()} placeholder="輸入角色名字⋯"
+            style={{width:'100%',background:'rgba(20,12,5,0.9)',border:`1px solid ${C.il}`,borderRadius:3,color:C.p,fontSize:'0.97rem',padding:'0.65rem 0.9rem',outline:'none'}}/>
+        </>}
+        {stepKey==='race'&&<>
+          <div style={{color:C.st,fontSize:'0.7rem',letterSpacing:'0.2em',marginBottom:'0.5rem'}}>第二步 · 選擇種族</div>
+          <OptionGrid options={RACES} value={race} onChange={setRace} columns={3}/>
+        </>}
+        {stepKey==='class'&&<>
+          <div style={{color:C.st,fontSize:'0.7rem',letterSpacing:'0.2em',marginBottom:'0.5rem'}}>第三步 · 選擇職業</div>
+          <OptionGrid options={CLASSES} value={cls} onChange={setCls} columns={3}/>
+        </>}
+        {stepKey==='align'&&<>
+          <div style={{color:C.st,fontSize:'0.7rem',letterSpacing:'0.2em',marginBottom:'0.5rem'}}>第四步 · 選擇陣營</div>
+          <OptionGrid options={ALIGNMENTS} value={align} onChange={setAlign} columns={3}/>
+        </>}
+        {stepKey==='campaign'&&<>
+          <div style={{color:C.st,fontSize:'0.7rem',letterSpacing:'0.2em',marginBottom:'0.5rem'}}>第五步 · 選擇劇情風格</div>
+          <OptionGrid options={STYLES} value={campaign} onChange={setCampaign} columns={2}/>
+          {campaign==='custom'&&<div style={{marginTop:'0.7rem'}}>
+            <div style={{color:C.st,fontSize:'0.7rem',letterSpacing:'0.15em',marginBottom:'0.4rem'}}>描述你想要的故事⋯</div>
+            <textarea value={customDesc} onChange={e=>setCustom(e.target.value)} rows={4}
+              placeholder="例：我想在一個被詛咒的沙漠王國裡，扮演一個尋找失散家人的流浪武士⋯"
+              style={{width:'100%',background:'rgba(20,12,5,0.9)',border:`1px solid ${C.il}`,borderRadius:3,color:C.p,fontSize:'0.9rem',padding:'0.6rem 0.9rem',outline:'none',resize:'vertical'}}/>
+          </div>}
+        </>}
+
+        {/* Navigation */}
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'1.4rem'}}>
+          <button onClick={()=>setStep(s=>s-1)} disabled={step===0}
+            style={{background:'transparent',border:`1px solid ${step===0?C.il:C.pd}`,color:step===0?C.il:C.pd,borderRadius:3,padding:'0.5rem 1rem',cursor:step===0?'default':'pointer',fontSize:'0.85rem',opacity:step===0?0.35:1}}>
+            ← 上一步
+          </button>
+          <div style={{color:C.st,fontSize:'0.7rem',textAlign:'center',lineHeight:1.6}}>
+            {name&&<span style={{color:C.pd}}>{name}</span>}
+            {race&&<span> · {race}</span>}
+            {cls&&<span> · {cls}</span>}
+          </div>
+          <button onClick={handleNext} disabled={!canNext()}
+            style={{background:canNext()?'rgba(201,150,58,0.3)':'rgba(0,0,0,0.2)',border:`1px solid ${canNext()?C.g:C.il}`,color:canNext()?C.gb:C.il,borderRadius:3,padding:'0.5rem 1.2rem',cursor:canNext()?'pointer':'default',fontSize:'0.88rem',transition:'all 0.15s'}}>
+            {isLast?'開始冒險 ▶':'下一步 →'}
+          </button>
+        </div>
+      </div>
+      <div style={{color:C.st,fontSize:'0.72rem',marginTop:'1.2rem',textAlign:'center',letterSpacing:'0.1em'}}>由 Gemini AI 擔任地城主 · Pathfinder 2e 規則框架</div>
+    </div>
+  )
+}
+
+// ── Character Panel ───────────────────────────────────────────────────────────
+function CharacterPanel({ character, open, onToggle }) {
+  return (
+    <Panel label="角色資訊" open={open} onToggle={onToggle} badge={character.name||null}>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0.25rem 1rem',fontSize:'0.83rem',marginBottom:'0.6rem'}}>
+        {[['名字',character.name],['職業',character.cls],['種族',character.race],['陣營',character.align],['等級',character.level]].map(([k,v])=>
+          <div key={k}><span style={{color:C.st,fontSize:'0.7rem'}}>{k} </span><span style={{color:C.p}}>{v||'—'}</span></div>)}
+      </div>
+      {/* HP */}
+      <div style={{display:'flex',alignItems:'center',gap:'0.6rem',marginBottom:'0.8rem'}}>
+        <span style={{color:C.st,fontSize:'0.7rem',whiteSpace:'nowrap'}}>體力</span>
+        <div style={{flex:1,height:7,background:'rgba(0,0,0,0.5)',border:`1px solid ${C.il}`,borderRadius:2,overflow:'hidden'}}>
+          <div style={{height:'100%',width:`${Math.max(0,(character.hp/character.maxHp)*100)}%`,background:'linear-gradient(90deg,#8b1a1a,#c0392b)',transition:'width 0.5s'}}/>
+        </div>
+        <span style={{fontSize:'0.82rem',whiteSpace:'nowrap'}}>{character.hp} / {character.maxHp}</span>
+      </div>
+      {/* Stats */}
+      <Divider label="六項能力值"/>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'0.4rem'}}>
+        {Object.entries(character.stats||{}).map(([k,v])=>
+          <div key={k} style={{background:'rgba(201,150,58,0.08)',border:'1px solid rgba(201,150,58,0.2)',borderRadius:3,padding:'0.35rem 0.4rem',textAlign:'center'}}>
+            <div style={{fontSize:'0.65rem',color:C.st}}>{STAT_NAMES[k]||k}</div>
+            <div style={{fontSize:'1.1rem',color:C.gb,lineHeight:1.2}}>{v}</div>
+            <div style={{fontSize:'0.75rem',color:C.pd}}>{mod(v)}</div>
+          </div>)}
+      </div>
+      {/* Skills */}
+      {character.skills?.length>0&&<>
+        <Divider label="技能"/>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0.2rem 0.8rem'}}>
+          {character.skills.map((s,i)=>
+            <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:'0.82rem',padding:'0.15rem 0',borderBottom:'1px solid rgba(255,255,255,0.04)'}}>
+              <div>
+                <span style={{color:C.p}}>{s.name}</span>
+                <span style={{marginLeft:'0.3rem',fontSize:'0.65rem',color:RANK_COLOR[s.rank]||C.g,background:'rgba(0,0,0,0.3)',padding:'0.05rem 0.3rem',borderRadius:2}}>{RANK_LABEL[s.rank]||s.rank}</span>
+              </div>
+              <span style={{color:C.gb,fontWeight:'bold'}}>{s.bonus>=0?'+':''}{s.bonus}</span>
+            </div>)}
+        </div>
+      </>}
+      {/* Feats */}
+      {character.feats?.length>0&&<>
+        <Divider label="專長"/>
+        <div style={{display:'flex',flexDirection:'column',gap:'0.2rem'}}>
+          {character.feats.map((f,i)=>{
+            const [name,...rest]=f.split('（'); const desc=rest.join('（').replace(/）$/,'')
+            return <div key={i} style={{background:'rgba(74,144,217,0.07)',border:'1px solid rgba(74,144,217,0.2)',borderRadius:3,padding:'0.3rem 0.6rem',fontSize:'0.82rem'}}>
+              <span style={{color:'#7ab8f5'}}>{name}</span>
+              {desc&&<span style={{color:C.st,fontSize:'0.75rem'}}> — {desc}</span>}
+            </div>})}
+        </div>
+      </>}
+    </Panel>
+  )
+}
+
+// ── Inventory Panel ───────────────────────────────────────────────────────────
+function InventoryPanel({ items=[], open, onToggle }) {
+  return (
+    <Panel label="🎒 裝備欄" open={open} onToggle={onToggle} badge={items.length>0?`${items.length}件`:null}>
+      {items.length===0
+        ? <div style={{color:C.st,fontStyle:'italic',fontSize:'0.85rem'}}>（尚無裝備）</div>
+        : <div style={{display:'flex',flexDirection:'column',gap:'0.3rem'}}>
+            {['weapon','armor','consumable','gear'].map(type=>{
+              const group=items.filter(it=>it.type===type); if(!group.length)return null
+              return <div key={type}>
+                <div style={{fontSize:'0.68rem',color:C.st,letterSpacing:'0.15em',margin:'0.3rem 0 0.15rem'}}>{TYPE_ICON[type]} {TYPE_LABEL[type]}</div>
+                {group.map((item,i)=><div key={i} style={{background:'rgba(201,150,58,0.07)',border:'1px solid rgba(201,150,58,0.18)',borderRadius:3,padding:'0.3rem 0.7rem',marginBottom:'0.15rem'}}>
+                  <span style={{color:C.gb,fontSize:'0.88rem'}}>{item.name}</span>
+                  {item.detail&&<div style={{color:C.pd,fontSize:'0.78rem',marginTop:'0.1rem',lineHeight:1.5}}>{item.detail}</div>}
+                </div>)}
+              </div>})}
+          </div>}
+    </Panel>
+  )
+}
+
+// ── Game Screen ───────────────────────────────────────────────────────────────
+function GameScreen({ apiKey, initialChar, systemPrompt, savedState, onNewGame }) {
+  const [messages, setMessages] = useState(savedState?.messages||[])
+  const [input, setInput]       = useState('')
+  const [loading, setLoading]   = useState(false)
+  const [dice, setDice]         = useState(null)
+  const [char, setChar]         = useState(savedState?.character||{...DEFAULT_CHAR,...initialChar})
+  const [tab, setTab]           = useState('scene')
+  const [charOpen, setCharOpen] = useState(false)
+  const [invOpen, setInvOpen]   = useState(false)
+  const logRef  = useRef(null)
+  const histRef = useRef(savedState?.history||[])
+
+  // persist
+  useEffect(()=>{
+    writeSave({phase:'game',messages,character:char,systemPrompt,history:histRef.current})
+  },[messages,char])
+
+  // scroll log
+  useEffect(()=>{
+    if(tab==='log'&&logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight
+  },[messages,tab])
+
+  const send = useCallback(async(action)=>{
+    const msg = action||input.trim(); if(!msg||loading)return
+    setInput(''); setLoading(true); setTab('scene')
+    setMessages(prev=>[...prev,{type:'player',text:msg}])
+    try {
+      const {reply,history:newHist} = await callGemini(apiKey, histRef.current, msg, systemPrompt)
+      histRef.current = newHist
+      const {cleanText,charData} = parseGMReply(reply)
+      if(charData) setChar(prev=>({...prev,...charData,level:String(charData.level??prev.level)}))
+      setMessages(prev=>[...prev,{type:'gm',text:cleanText}])
+    } catch(e) {
+      setMessages(prev=>[...prev,{type:'gm',text:'⚠ '+e.message}])
+    }
+    setLoading(false)
+  },[input,loading,apiKey,systemPrompt])
+
+  // init
+  useEffect(()=>{
+    if(histRef.current.length===0) send('冒險開始。請根據我的角色與劇情設定，生成這個世界，描述起始場景，並給我一個清晰的開場鉤子。')
+  },[])
+
+  const rollDice = sides => {
+    const roll = Math.floor(Math.random()*sides)+1
+    let q=''
+    if(sides===20){if(roll===20)q='✨ 大成功！';else if(roll>=17)q='✅ 成功';else if(roll>=10)q='⚡ 普通';else if(roll>=2)q='❌ 失敗';else q='💀 大失敗！'}
+    setDice({sides,roll,q}); setInput(`（擲出 d${sides}，結果：${roll}）`)
+  }
+
+  const loadFile = e => {
+    const file=e.target.files?.[0]; if(!file)return
+    const reader=new FileReader()
+    reader.onload=ev=>{
+      try {
+        const d=JSON.parse(ev.target.result)
+        histRef.current=d.history||[]; setChar(d.character||{...DEFAULT_CHAR}); setMessages(d.messages||[])
+      } catch { alert('存檔格式錯誤') }
+    }
+    reader.readAsText(file)
+  }
+
+  const lastGM = [...messages].reverse().find(m=>m.type==='gm')
+  const btn  = {cursor:'pointer',borderRadius:3,fontSize:'0.8rem',padding:'0.4rem 0.3rem',border:`1px solid ${C.il}`,background:'rgba(44,26,14,0.8)',color:C.pd}
+  const dBtn = {...btn,border:`1px solid ${C.bl}`,background:'rgba(139,26,26,0.2)',color:'#e07070'}
+
+  return (
+    <div style={{background:C.sh,minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+      {/* Header */}
+      <div style={{textAlign:'center',padding:'0.75rem 1rem',borderBottom:`2px solid ${C.g}`,background:'rgba(0,0,0,0.5)',flexShrink:0,position:'relative'}}>
+        <div style={{fontSize:'1.3rem',color:C.gb,fontWeight:'bold',textShadow:'0 0 20px rgba(240,184,74,0.4)'}}>⚔ 巡路者傳奇 ⚔</div>
+        <div style={{fontSize:'0.66rem',color:C.st,letterSpacing:'0.2em',marginTop:'0.1rem'}}>{char.name} · {char.race} {char.cls} · Lv.{char.level}</div>
+        <button onClick={onNewGame} style={{position:'absolute',right:'0.8rem',top:'50%',transform:'translateY(-50%)',...btn,fontSize:'0.72rem',padding:'0.25rem 0.6rem'}}>✦ 新冒險</button>
+      </div>
+
+      <div style={{maxWidth:700,width:'100%',margin:'0 auto',padding:'0.6rem',flex:1,display:'flex',flexDirection:'column',gap:'0.5rem'}}>
+        {/* Top bar */}
+        <div style={{display:'flex',gap:'0.35rem',justifyContent:'flex-end'}}>
+          <button onClick={()=>doExport({phase:'game',messages,character:char,systemPrompt,history:histRef.current})}
+            style={{...btn,padding:'0.25rem 0.6rem',border:`1px solid ${C.g}`,color:C.gb,fontSize:'0.75rem'}}>💾 匯出</button>
+          <label style={{...btn,padding:'0.25rem 0.6rem',border:`1px solid ${C.g}`,color:C.gb,fontSize:'0.75rem',cursor:'pointer'}}>
+            📂 載入<input type="file" accept=".json" onChange={loadFile} style={{display:'none'}}/>
+          </label>
+        </div>
+
+        <CharacterPanel character={char} open={charOpen} onToggle={()=>setCharOpen(v=>!v)}/>
+        <InventoryPanel items={char.items} open={invOpen} onToggle={()=>setInvOpen(v=>!v)}/>
+
+        {/* Tabs */}
+        <div style={{display:'flex',flexShrink:0}}>
+          {['scene','log'].map(t=>(
+            <button key={t} onClick={()=>setTab(t)} style={{flex:1,padding:'0.38rem',fontSize:'0.78rem',cursor:'pointer',
+              borderRadius:t==='scene'?'3px 0 0 3px':'0 3px 3px 0',
+              background:tab===t?'rgba(201,150,58,0.22)':'rgba(0,0,0,0.3)',
+              border:`1px solid ${tab===t?C.g:C.il}`,color:tab===t?C.gb:C.pd}}>
+              {t==='scene'?'📜 當前場景':'📖 完整劇情'}
+            </button>
+          ))}
+        </div>
+
+        {/* Scene */}
+        {tab==='scene'&&(
+          <div style={{background:'linear-gradient(180deg,rgba(30,18,8,0.98),rgba(20,12,5,0.99))',border:`1px solid ${C.g}`,borderRadius:4,padding:'1rem',minHeight:180,flex:1,overflowY:'auto'}}>
+            <div style={{color:C.g,fontSize:'0.66rem',letterSpacing:'0.3em',marginBottom:'0.5rem'}}>場景描述</div>
+            <div style={{fontSize:'0.97rem',lineHeight:1.9,color:C.p,whiteSpace:'pre-wrap'}}>
+              {loading?'地城主思考中⋯':(lastGM?.text||'正在召喚世界⋯')}
+            </div>
+          </div>
+        )}
+
+        {/* Log */}
+        {tab==='log'&&(
+          <div ref={logRef} style={{background:'rgba(10,6,2,0.95)',border:`1px solid ${C.g}`,borderRadius:4,padding:'0.8rem',flex:1,overflowY:'auto',minHeight:180}}>
+            <div style={{color:C.g,fontSize:'0.66rem',letterSpacing:'0.3em',marginBottom:'0.5rem'}}>完整劇情紀錄</div>
+            {messages.map((m,i)=>(
+              <div key={i} style={{marginBottom:'0.8rem',paddingBottom:'0.8rem',borderBottom:'1px solid rgba(201,150,58,0.08)'}}>
+                <div style={{fontSize:'0.68rem',color:m.type==='player'?C.gb:'#c06050',marginBottom:'0.15rem',letterSpacing:'0.1em'}}>
+                  {m.type==='player'?`▷ ${char.name}`:'◆ 地城主'}
+                </div>
+                <div style={{fontSize:'0.92rem',lineHeight:1.8,color:m.type==='player'?C.pd:C.p,whiteSpace:'pre-wrap',fontStyle:m.type==='gm'?'italic':'normal'}}>
+                  {m.text}
+                </div>
+              </div>
+            ))}
+            {loading&&<div style={{color:C.g,fontStyle:'italic',fontSize:'0.85rem'}}>地城主思考中⋯</div>}
+          </div>
+        )}
+
+        {/* Dice */}
+        {dice&&(
+          <div style={{background:'rgba(201,150,58,0.1)',border:`1px solid ${C.g}`,borderRadius:4,padding:'0.35rem 1rem',textAlign:'center',flexShrink:0}}>
+            <span style={{color:C.st,fontSize:'0.7rem'}}>d{dice.sides} </span>
+            <span style={{fontSize:'1.8rem',color:C.gb,textShadow:`0 0 12px ${C.g}`,margin:'0 0.4rem'}}>{dice.roll}</span>
+            <span style={{color:C.pd,fontSize:'0.83rem'}}>{dice.q}</span>
+          </div>
+        )}
+
+        {/* Quick actions */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'0.35rem',flexShrink:0}}>
+          {[['🔍 察覺','我仔細觀察四周環境'],['💬 交涉','我試著與對方交談，套取情報'],['🗝 搜查','我搜查這個地方，尋找隱藏的東西']].map(([l,a])=>(
+            <button key={l} onClick={()=>send(a)} disabled={loading} style={btn}>{l}</button>
+          ))}
+          {[20,6,4].map(s=>(
+            <button key={s} onClick={()=>rollDice(s)} disabled={loading} style={dBtn}>🎲 d{s}</button>
+          ))}
+        </div>
+
+        {/* Input */}
+        <div style={{display:'flex',gap:'0.45rem',flexShrink:0}}>
+          <textarea value={input} onChange={e=>setInput(e.target.value)}
+            onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}}}
+            placeholder="輸入你的行動或對話⋯（Enter 送出，Shift+Enter 換行）"
+            rows={2} disabled={loading}
+            style={{flex:1,background:'rgba(20,12,5,0.9)',border:`1px solid ${C.il}`,borderRadius:3,color:C.p,fontSize:'0.93rem',padding:'0.55rem 0.8rem',outline:'none',resize:'none'}}/>
+          <button onClick={()=>send()} disabled={loading||!input.trim()}
+            style={{background:'rgba(201,150,58,0.3)',border:`1px solid ${C.g}`,color:C.gb,fontSize:'0.85rem',padding:'0.55rem 1rem',cursor:'pointer',borderRadius:3,whiteSpace:'nowrap',opacity:(loading||!input.trim())?0.5:1}}>
+            行動 ▶
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Root ──────────────────────────────────────────────────────────────────────
+function Root() {
+  const [apiKey, setApiKey]       = useState(loadApiKey)
+  const [phase, setPhase]         = useState('loading')
+  const [gameProps, setGameProps] = useState(null)
+
+  useEffect(()=>{
+    if (!apiKey) { setPhase('apikey'); return }
+    const saved = loadSave()
+    if (saved?.phase==='game' && saved?.systemPrompt) {
+      setGameProps({ systemPrompt: saved.systemPrompt, savedState: saved })
+      setPhase('game')
+    } else {
+      setPhase('creation')
+    }
+  },[apiKey])
+
+  const handleApiKey = key => { setApiKey(key); setPhase('creation') }
+
+  const handleStart = (char, styleId, customDesc) => {
+    const prompt = buildPrompt(char, styleId, customDesc)
+    setGameProps({ initialChar:char, systemPrompt:prompt, savedState:null })
+    setPhase('game')
+  }
+
+  const handleNewGame = () => {
+    const saved = loadSave()
+    if (saved) doExport(saved)
+    clearSave()
+    setGameProps(null)
+    setPhase('creation')
+  }
+
+  if (phase==='loading')   return <div style={{background:C.sh,minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:C.g}}>載入中⋯</div>
+  if (phase==='apikey')    return <ApiKeyScreen onConfirm={handleApiKey}/>
+  if (phase==='creation')  return <CharacterCreation onStart={handleStart}/>
+  if (phase==='game')      return <GameScreen apiKey={apiKey} {...gameProps} onNewGame={handleNewGame}/>
+  return null
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Root/>)
+</script>
+</body>
+</html>
